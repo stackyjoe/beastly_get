@@ -1,0 +1,10 @@
+Simple HTTP/HTTPS file downloader program. Use in one of two ways:
+
+    beastly_get URL_TO_FILE name_to_be_saved_as
+
+or
+
+    beastly_get LOCAL_FILE
+
+where LOCAL_FILE is a local file that just consists of pairs of URLs and desired file names.
+
