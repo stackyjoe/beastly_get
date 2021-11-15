@@ -12,6 +12,8 @@
 
 #include <fmt/core.h>
 
+#include "generic_exception_handling.hpp"
+#include "debug_print.hpp"
 #include "string_functions.hpp"
 #include "getter.hpp"
 
@@ -24,18 +26,45 @@ getter::getter() :
     ioc(),
     resolver(ioc),
     guard(boost::asio::make_work_guard(ioc)),
-    run_thread([this](){this->ioc.run();})
+    networking_threads(std::make_unique<std::thread[]>(number_of_threads))
 {
-
+    for(size_t i = 0; i < number_of_threads; ++i)
+        networking_threads[i] = std::thread([this](){this->ioc.run();});
 }
 
 getter::~getter() {
     guard.reset();
-    run_thread.join();
+    for(size_t i = 0; i < number_of_threads; ++i)
+        networking_threads[i].join();
 }
 
 auto get_time_stamp() {
     return std::chrono::high_resolution_clock::now();
+}
+
+std::unique_ptr<beastly_connection> getter::make_connection(parsed_url uri) {
+    const auto protocols = {ssl::context::tlsv11, ssl::context::tlsv12, ssl::context::tlsv13};
+
+    std::unique_ptr<beastly_connection> network_resources;
+
+    if(uri.protocol == "https") {
+        for(auto p : protocols) {
+            network_resources = std::make_unique<beastly_connection>(uri, ioc, resolver);
+            auto ec = network_resources->set_up_ssl(p, ssl::verify_peer);
+            if(!ec) {
+                break;
+            }
+            else {
+                network_resources.release();
+                debug_print(fmt::format("Algorithm ID {}: An error occurred attempting to set up SSL: {}\n", p, ec.message()));
+            }
+        }
+    }
+    else {
+        network_resources = std::make_unique<beastly_connection>(uri, ioc, resolver);
+    }
+
+    return network_resources;
 }
 
 void getter::coro_download(std::string url,
@@ -44,41 +73,37 @@ void getter::coro_download(std::string url,
                            std::promise<bool> promise,
                            boost::asio::yield_context yield_ctx) {
     boost::beast::error_code ec;
-    std::vector<ssl::context_base::method> protocols {ssl::context::tlsv11, ssl::context::tlsv12, ssl::context::tlsv13};
-    constexpr size_t max_redirects = 10;
+    //auto protocols = {ssl::context::tlsv11, ssl::context::tlsv12, ssl::context::tlsv13};
+    constexpr size_t max_redirects = 5;
+        
     auto parsed = parse(url);
+
+    if(parsed.host.empty()) {
+        promise.set_value(false);
+        return;
+    }
+
     size_t length_hint = 0;
 
     std::unique_ptr<beastly_connection> network_resources;
 
-    if(parsed.protocol == "https") {
-        for(auto p : protocols) {
-            network_resources = std::make_unique<beastly_connection>(parsed, ioc, resolver);
-            auto ec = network_resources->set_up_ssl(p, ssl::verify_none);
-            if(!ec) {
-                break;
-            }
-            else {
-                network_resources.release();
-                fmt::print("Algorithm ID {}: An error occurred attempting to set up SSL: {}\n", p, ec.message());
-            }
-        }
-    }
-    else {
-        network_resources = std::make_unique<beastly_connection>(parsed, ioc, resolver);
-    }
+    network_resources = make_connection(parsed);
 
     if(!network_resources) {
         fmt::print("Was not able to set up an SSL connection.\n");
         return;
     }
 
-    fmt::print("Getting the header.\n");
+    parsed_url old;
 
     // Find the file + get a length hint to use later.
     for(size_t i = 0; i < max_redirects; ++i) {
+        debug_print("Attempting to get header, redirect {}\n", i);
+
         http::request<http::string_body> hdr_req {http::verb::head, parsed.total_path, 11};
-        hdr_req.set(http::field::host, parsed.host.c_str());
+        std::string cleaned_host_name = parsed.host + ":" + parsed.port;
+
+        hdr_req.set(http::field::host, cleaned_host_name.c_str());
         hdr_req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
 
         network_resources->write_request(hdr_req, yield_ctx[ec]);
@@ -93,22 +118,27 @@ void getter::coro_download(std::string url,
         }
 
         auto status = network_resources->get_status();
+        old = parsed;
 
         switch(status) {
             case http::status::ok: {
-                //std::cout << "HTTP status is OK" << std::endl;
+                fmt::print("\tok\n");
                 auto s = network_resources->parser().base()["Content-Length"].to_string();
-                length_hint = s.empty()? 0 : std::stoi(s);
-                break;
+                length_hint = s.empty()? beastly_connection::default_download_limit : std::max(beastly_connection::default_download_limit,static_cast<size_t>(std::stoul(s)));
+                goto try_to_get;
             }
             case http::status::found: {
                 parsed = parse(network_resources->parser().base()["Location"].to_string());
+                if(parsed == old)
+                    goto try_to_get;
+                
                 continue;
             }
             case http::status::moved_permanently: {
                 parsed = parse(network_resources->parser().base()["Location"].to_string());
+                if(old == parsed)
+                    goto try_to_get;
                 continue;
-
             }
             default: {
                 fmt::print("Received unexpected HTTP status: {}\n", status);
@@ -119,53 +149,45 @@ void getter::coro_download(std::string url,
 
     }
 
+try_to_get:
+
     network_resources.release();
 
-    if(parsed.protocol == "https") {
-        for(auto p : protocols) {
-            network_resources = std::make_unique<beastly_connection>(parsed,
-                                                                     ioc,
-                                                                     resolver);
-            auto ec = network_resources->set_up_ssl(p, ssl::verify_none);
-            if(!ec) {
-                break;
-            }
-            else {
-                network_resources.release();
-                fmt::print("Algorithm ID {}: An error occurred attempting to set up SSL: {}\n", p, ec.message());
-            }
-
-        }
-    }
-    else {
-        network_resources = std::make_unique<beastly_connection>(parsed,
-                                                                 ioc,
-                                                                 resolver);
-    }
+    network_resources = make_connection(parsed);
 
     if(!network_resources) {
         fmt::print("Was not able to set up an SSL connection.\n");
         return;
     }
 
-    // At this point we've found the true url and (possibly) gotten a size hint. We just need to download the file!
-    for(size_t i = 0; i < max_redirects; ++i) {
+    length_hint = std::max(beastly_connection::default_download_limit, length_hint);
 
-        auto const start_time = get_time_stamp();
-        auto print_time_taken = [start_time]() {
+    network_resources->set_parser_body_limit(length_hint);
+
+    debug_print("Length hint: {}\n", length_hint);
+
+    auto print_time_taken_since = [](auto start_time) {
             auto end_time = get_time_stamp();
             std::chrono::duration<double> dur = end_time - start_time;
 
             fmt::print("Download took {}\n", dur.count());
         };
 
-        network_resources->set_parser_body_limit(length_hint);
+    // At this point we've found the true url and (possibly) gotten a size hint. We just need to download the file!
+    for(size_t i = 0; i < max_redirects; ++i) {
+
+        debug_print("Attempting with redirect {}\n", i);
+
+        auto const start_time = get_time_stamp();
+        
+        std::string cleaned_host_name = parsed.host + ":" + parsed.port;
 
         http::request<http::string_body> file_req {http::verb::get, parsed.total_path, 11};
-        file_req.set(http::field::host, parsed.host.c_str());
+        file_req.set(http::field::host, cleaned_host_name.c_str());
         file_req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
 
         network_resources->write_request(std::move(file_req), yield_ctx[ec]);
+
         if(ec) {
             fmt::print("write_request failed: {}\n", ec.message());
             return;
@@ -175,14 +197,17 @@ void getter::coro_download(std::string url,
         while(1) {
             size_t bytes_read = network_resources->async_read_some(yield_ctx[ec]);
 
-            if(ec || network_resources->parser_is_done()) {
+            if(ec) {
+                fmt::print("error.\n");
+            }
+            if(network_resources->parser_is_done()) {
                 auto status = network_resources->get_status();
                 parsed_url old = parsed;
 
                 switch(status) {
                     case http::status::ok: {
                         completion_handler(ec, bytes_read, *network_resources);
-                        print_time_taken();
+                        print_time_taken_since(start_time);
                         promise.set_value(true);
                         return;
                     }
@@ -216,50 +241,35 @@ void getter::coro_download(std::string url,
 
         }
         break_read_loop:;
+
+        network_resources.release();
+
+        network_resources = make_connection(parsed);
+        network_resources->set_parser_body_limit(length_hint);
+
+
+        if(!network_resources) {
+            fmt::print("Was not able to set up an SSL connection.\n");
+            return;
+        }
     }
 
 final_attempt:
-    network_resources.release();
+    debug_print("Final attempt: {}://{}:{}{}\n", parsed.protocol, parsed.host, parsed.port, parsed.path);
 
-    if(parsed.protocol == "https") {
-        for(auto p : protocols) {
-            network_resources = std::make_unique<beastly_connection>(parsed,
-                                                                     ioc,
-                                                                     resolver);
-            auto ec = network_resources->set_up_ssl(p, ssl::verify_none);
-            if(!ec) {
-                break;
-            }
-            else {
-                network_resources.release();
-                fmt::print("Algorithm ID {}: An error occurred attempting to set up SSL: {}\n", p, ec.message());
-            }
-
-        }
-    }
-    else {
-        network_resources = std::make_unique<beastly_connection>(parsed,
-                                                                 ioc,
-                                                                 resolver);
-    }
 
     auto const start_time = get_time_stamp();
-    auto print_time_taken = [start_time]() {
-        auto end_time = get_time_stamp();
-        std::chrono::duration<double> dur = end_time - start_time;
 
-        fmt::print("Download took {}\n", dur.count());
-    };
-
-    network_resources->set_parser_body_limit(length_hint);
 
     http::request<http::string_body> file_req {http::verb::get, parsed.total_path, 11};
-    file_req.set(http::field::host, parsed.host.c_str());
+    std::string cleaned_host_name = parsed.host + ":" + parsed.port;
+
+    file_req.set(http::field::host, cleaned_host_name.c_str());
     file_req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
 
     network_resources->write_request(std::move(file_req), yield_ctx[ec]);
     if(ec) {
-        fmt::print("write_request failed: {}\n", ec.message());
+        debug_print("write_request failed: {}\n", ec.message());
         return;
     }
 
@@ -267,9 +277,12 @@ final_attempt:
     while(1) {
         size_t bytes_read = network_resources->async_read_some(yield_ctx[ec]);
 
-        if(ec || network_resources->parser_is_done()) {
+        if(ec) {
+            fmt::print("error\n");
+        }
+        if(network_resources->parser_is_done()) {
             completion_handler(ec, bytes_read, *network_resources);
-            print_time_taken();
+            print_time_taken_since(start_time);
             promise.set_value(true);
             return;
         }
@@ -277,7 +290,6 @@ final_attempt:
         completed += bytes_read;
         progress_handler(completed, length_hint);
     }
-
 
 }
 

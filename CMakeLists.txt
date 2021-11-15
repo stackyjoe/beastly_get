@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.1)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 17)
 
 project(beastly_get)
 
@@ -22,13 +22,11 @@ set(Boost_USE_STATIC_LIBS ON)
 set(Boost_USE_MULTITHREADED ON)
 set(Boost_USE_STATIC_RUNTIME OFF)
 
-add_definitions(-DBOOST_ASIO_DISABLE_CONCEPTS)
-
-find_package(Boost 1.72.0 COMPONENTS)
+find_package(Boost 1.75.0 COMPONENTS)
 
 if(Boost_FOUND)
     include_directories(${Boost_INCLUDE_DIRS})
-    target_link_libraries(${PROJECT_NAME} boost_context boost_coroutine)
+    target_link_libraries(${PROJECT_NAME} boost_context boost_coroutine boost_system)
 endif()
 #end Boost
 

@@ -9,6 +9,7 @@
 #include "egg_timer.hpp"
 #include "getter.hpp"
 #include "url_parser.hpp"
+#include "debug_print.hpp"
 
 void completion_handler(boost::beast::error_code const &ec,
                         [[maybe_unused]] size_t bytes_read,
@@ -26,7 +27,7 @@ void completion_handler(boost::beast::error_code const &ec,
 
     output_file.write(contents.c_str(), contents.size());
     output_file.close();
-    fmt::print("wrote to file\n");
+    debug_print("wrote to file\n");
 }
 
 int main(int argc, char** argv)
@@ -92,6 +93,8 @@ int main(int argc, char** argv)
                         }
     );
 
+    auto noop_prog = [](size_t, size_t) {};
+
     auto cmp = [file_dest](boost::beast::error_code const &ec,
             [[maybe_unused]] size_t bytes_read,
              beastly_connection &resources) {
@@ -100,7 +103,7 @@ int main(int argc, char** argv)
 
     try {
 
-        auto f = get.get(url, std::move(prog), std::move(cmp));
+        auto f = get.get(url, std::move(noop_prog), std::move(cmp));
 
         // Future goes out of scope, std::future's destructor waits on the promise,
         // so the process doesn't complete until the download calls the completion handler.

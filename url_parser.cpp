@@ -5,7 +5,7 @@
 
 #include <functional>
 
-#include <range/v3/range.hpp>
+#include <fmt/core.h>
 
 #include "url_parser.hpp"
 
@@ -60,7 +60,7 @@ parsed_url parse(std::string url) noexcept {
         return desiderata;
     }
 
-    std::cout << "Failed to parse.\n";
+    fmt::print("Failed to parse: {}\n", url);
 
     return desiderata;
 }

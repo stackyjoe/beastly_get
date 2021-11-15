@@ -17,10 +17,7 @@
 class beastly_connection
 {
 private:
-    static constexpr size_t default_download_limit = 1024*1024*64;
 
-    size_t completed;
-    size_t total;
     parsed_url url;
     boost::asio::ip::tcp::socket socket_;
     std::optional<boost::asio::ssl::context> ssl_context_;
@@ -30,6 +27,9 @@ private:
     std::promise<bool> promise;
 
 public:
+    static constexpr size_t default_download_limit = 1024*1024*128;
+
+
     beastly_connection(parsed_url url,
                        boost::asio::io_context &io_context,
                        boost::asio::ip::tcp::resolver &resolver);
@@ -55,7 +55,8 @@ public:
     }
 
     void set_parser_body_limit(size_t size_hint) {
-        parser_.body_limit(std::max(default_download_limit, size_hint));
+        size_t desired = std::template max<size_t>(default_download_limit, size_hint);
+        parser_.body_limit(desired);
     }
 
     [[nodiscard]] boost::beast::error_code set_up_ssl(boost::asio::ssl::context_base::method method, boost::asio::ssl::verify_mode mode);
@@ -66,7 +67,7 @@ public:
     bool parser_is_done() const noexcept;
 
     boost::beast::http::status get_status() const noexcept;
-
+    void set_up_certificates();
 };
 
 #endif // BEASTLY_CONNECTION_HPP
